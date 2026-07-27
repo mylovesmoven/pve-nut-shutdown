@@ -5,7 +5,7 @@
 一条命令部署，自动识别 UPS 型号、自动探测虚拟机、自动生成配置。
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/mylovesmoven/pve-nut-shutdown/main/install.sh)
+bash <(curl -4 -fsSL https://raw.githubusercontent.com/mylovesmoven/pve-nut-shutdown/main/install.sh)
 ```
 
 ## 为什么不用 apcupsd
@@ -62,8 +62,13 @@ lsusb | grep -i -E "UPS|American Power"
 ### 一键安装
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/mylovesmoven/pve-nut-shutdown/main/install.sh)
+bash <(curl -4 -fsSL https://raw.githubusercontent.com/mylovesmoven/pve-nut-shutdown/main/install.sh)
 ```
+
+> `-4` 是强制走 IPv4。不少国内环境下 DNS 只返回 GitHub 的 IPv6 地址，
+> 但本机又没有 IPv6 出口，不加这个参数 curl 会一直卡住且不报错。
+
+拉不下来的话，直接复制 [install.sh](install.sh) 的内容存成文件再执行也一样。
 
 ### 或者克隆后安装
 
