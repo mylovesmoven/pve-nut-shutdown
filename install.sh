@@ -178,21 +178,34 @@ fi
 # UPS 在 NUT 中的名称(仅字母数字下划线)
 DEFAULT_NAME=$(echo "${PRODUCT:-ups}" | tr -cd 'A-Za-z0-9' | tr 'A-Z' 'a-z' | cut -c1-16)
 [[ -n "$DEFAULT_NAME" ]] || DEFAULT_NAME="myups"
-UPSNAME=$(ask "为这台 UPS 取个名字(用于 upsc 命令)" "$DEFAULT_NAME")
+echo
+echo "给这台 UPS 起个代号, 以后查看状态时要用到, 比如: upsc ${DEFAULT_NAME}"
+echo "只能用英文字母和数字。想省事就直接回车。"
+UPSNAME=$(ask "UPS 代号" "$DEFAULT_NAME")
+# 名称里有非法字符会让 NUT 起不来, 这里直接过滤掉
+UPSNAME=$(echo "$UPSNAME" | tr -cd 'A-Za-z0-9_-')
+[[ -n "$UPSNAME" ]] || UPSNAME="$DEFAULT_NAME"
 
 # -----------------------------------------------------------------------------
 # 3. 交互配置关机策略
 # -----------------------------------------------------------------------------
 title "关机策略"
-echo "市电中断后, 等待多久才开始关机?"
-echo "  - 太短: 电网瞬时抖动/跳闸重合闸会导致误关机"
-echo "  - 太长: 浪费电池续航, 留给关闭 VM 的时间变少"
-ONBATT_DELAY=$(ask "断电延迟(秒)" "120")
+echo "市电断了以后, 先等一会儿再关机 —— 因为大部分停电只是几秒钟的"
+echo "跳闸或电压抖动, 等一等就恢复了, 没必要把整台服务器关掉。"
+echo
+echo "  等太短: 电网抖一下就误关机"
+echo "  等太长: 白白消耗电池, 留给关虚拟机的时间变少"
+echo
+echo "不确定填多少就直接回车用默认值。"
+ONBATT_DELAY=$(ask "断电后等待多少秒再关机" "120")
 
 echo
-echo "电池电量低于多少百分比时, 跳过等待立即关机?"
-echo "  注意: 很多 UPS 出厂值高达 90+%, 会架空上面的延迟设置"
-LOWBATT_PCT=$(ask "低电量阈值(%)" "30")
+echo "如果电池快没电了, 就不能再等上面那 ${ONBATT_DELAY} 秒了, 得立刻关机。"
+echo "电量低于多少时立刻关机?"
+echo
+echo "  ${YELLOW}提示: 不少 UPS 出厂设的是 90% 以上, 意味着电量刚掉一点就立刻关机,${NC}"
+echo "  ${YELLOW}      上面设的 ${ONBATT_DELAY} 秒等待就白设了。本脚本会帮你改成下面这个值。${NC}"
+LOWBATT_PCT=$(ask "电量低于百分之几时立刻关机" "30")
 
 # -----------------------------------------------------------------------------
 # 4. 探测 VM/LXC, 生成关机顺序
@@ -206,28 +219,128 @@ if [[ -z "$VM_LIST" && -z "$CT_LIST" ]]; then
     warn "未发现任何 VM 或 LXC"
     SHUTDOWN_GROUPS='GROUP1=""'
 else
-    echo "当前 VM:"
-    qm list 2>/dev/null | sed 's/^/      /'
+    # 收集 VMID 与名称, 供后面校验和显示用
+    declare -A VM_NAMES
+    VALID_IDS=""
+    while read -r id name st; do
+        [[ -z "$id" ]] && continue
+        VM_NAMES["$id"]="$name"
+        VALID_IDS+="$id "
+    done < <(qm list 2>/dev/null | awk 'NR>1{print $1, $2, $3}')
+
+    echo "这台 PVE 上的虚拟机:"
+    echo
+    printf "      %-8s %-20s %s\n" "VMID" "名称" "当前状态"
+    printf "      %-8s %-20s %s\n" "------" "--------------------" "--------"
+    qm list 2>/dev/null | awk 'NR>1{printf "      %-8s %-20s %s\n", $1, $2, $3}'
+
     if [[ -n "$CT_LIST" ]]; then
-        echo "当前 LXC:"
+        echo
+        echo "LXC 容器(会在虚拟机之后自动关闭, 无需手工分组):"
         pct list 2>/dev/null | sed 's/^/      /'
     fi
 
+    # 用真实存在的 VMID 造两个例子, 比抽象说明好懂
+    _ids=($VALID_IDS)
+    VMID_EXAMPLE="${_ids[0]:-101}${_ids[1]:+ ${_ids[1]}}"
+    VMID_TMO_EXAMPLE="${_ids[0]:-101}:180"
+
     echo
-    echo "关机顺序建议(组内并行, 组间串行):"
-    echo "  第1组 - 普通虚拟机(桌面/应用/开发机)"
-    echo "  第2组 - 存储类(NAS/文件服务器), 需要更长时间落盘"
-    echo "  第3组 - 网络类(软路由/旁路由), 最后关闭"
+    echo "接下来给虚拟机排一个关机顺序。"
+    echo "同一组里的虚拟机同时关闭; 一组全部停止后, 才开始关下一组。"
     echo
-    echo "格式: VMID:超时秒数, 多个用空格分隔。留空表示该组为空。"
-    echo "未列出的 VM 会在最后被兜底强制停止。"
+    echo "  第1组 —— 普通虚拟机(桌面/应用/开发机), 最先关"
+    echo "  第2组 —— 存储类(NAS/文件服务器), 需要时间落盘"
+    echo "  第3组 —— 网络类(软路由/旁路由), 最后关, 保住网络"
+    echo
+    echo "${BOLD}怎么填: 输入上面表格里的「VMID」那一列的数字, 多个用空格分隔。${NC}"
+    echo "  例如: ${GREEN}${VMID_EXAMPLE}${NC}"
+    echo "  不想给某一组安排虚拟机, 直接回车留空即可。"
+    echo
+    echo "每台虚拟机默认等 120 秒; 想单独指定就写成 ${GREEN}VMID:秒数${NC}, 例如 ${GREEN}${VMID_TMO_EXAMPLE}${NC}。"
+    echo "没填进任何一组的虚拟机, 会在最后被强制停止(相当于硬断电, 尽量别漏)。"
     echo
 
-    # 默认: 全部放第1组, 各给 120 秒
-    ALL_VMS=$(qm list 2>/dev/null | awk 'NR>1{printf "%s:120 ", $1}')
-    G1=$(ask "第1组(普通VM)" "${ALL_VMS% }")
-    G2=$(ask "第2组(NAS/存储)" "")
-    G3=$(ask "第3组(软路由/网络)" "")
+    # 校验并规范化一组输入: 返回 "VMID:超时" 格式, 非法项会提示重填
+    normalize_group() {
+        local raw="$1" out="" item vm tmo
+        for item in $raw; do
+            vm="${item%%:*}"
+            tmo="${item##*:}"
+            [[ "$tmo" == "$vm" ]] && tmo=120
+            if [[ ! "$vm" =~ ^[0-9]+$ ]]; then
+                err "  「$item」不是有效的 VMID(必须是数字)"
+                return 1
+            fi
+            if ! echo "$VALID_IDS" | grep -qw "$vm"; then
+                err "  VMID $vm 不存在。可用的有: $(echo $VALID_IDS | tr '\n' ' ')"
+                return 1
+            fi
+            if [[ ! "$tmo" =~ ^[0-9]+$ ]]; then
+                err "  「$item」的超时值不是数字"
+                return 1
+            fi
+            out+="$vm:$tmo "
+        done
+        echo "${out% }"
+        return 0
+    }
+
+    # 反复询问直到输入合法
+    ask_group() {
+        local prompt="$1" default="$2" raw result
+        while true; do
+            raw=$(ask "$prompt" "$default")
+            [[ -z "${raw// }" ]] && { echo ""; return; }
+            if result=$(normalize_group "$raw" 2>/dev/tty); then
+                echo "$result"
+                return
+            fi
+            [[ $ASSUME_YES -eq 1 ]] && { echo ""; return; }   # 非交互模式不死循环
+        done
+    }
+
+    # 默认只把「正在运行」的虚拟机放进第1组 —— 没开机的放进去没意义
+    ALL_VMS=$(qm list 2>/dev/null | awk 'NR>1 && $3=="running"{printf "%s ", $1}')
+    G1=$(ask_group "第1组 普通虚拟机" "${ALL_VMS% }")
+    G2=$(ask_group "第2组 存储/NAS" "")
+    G3=$(ask_group "第3组 软路由/网络" "")
+
+    # 只对「正在运行却没分组」的虚拟机告警 —— 没开机的本来就不用管
+    ASSIGNED=$(echo "$G1 $G2 $G3" | tr ' ' '\n' | cut -d: -f1 | grep -v '^$' | sort -u)
+    RUNNING_IDS=$(qm list 2>/dev/null | awk 'NR>1 && $3=="running"{print $1}')
+    MISSING=""
+    for v in $RUNNING_IDS; do
+        echo "$ASSIGNED" | grep -qw "$v" || MISSING+="$v "
+    done
+
+    echo
+    echo "${BOLD}关机顺序确认:${NC}"
+    print_group() {
+        local g="$1" label="$2"
+        if [[ -z "${g// }" ]]; then
+            echo "  $label: (空)"
+        else
+            local line="  $label:"
+            for item in $g; do
+                local vm="${item%%:*}" tmo="${item##*:}"
+                line+=" ${vm}(${VM_NAMES[$vm]:-?}, ${tmo}s)"
+            done
+            echo "$line"
+        fi
+    }
+    print_group "$G1" "第1组"
+    print_group "$G2" "第2组"
+    print_group "$G3" "第3组"
+    if [[ -n "${MISSING// }" ]]; then
+        echo
+        warn "以下虚拟机正在运行, 但没安排在任何组里 —— 断电时会被强制停止:"
+        for v in $MISSING; do
+            warn "    VM $v (${VM_NAMES[$v]:-?})"
+        done
+        warn "强制停止相当于直接拔电源, 有损坏数据的风险。建议把它们填进上面某一组。"
+    fi
+    echo
 fi
 
 # -----------------------------------------------------------------------------
