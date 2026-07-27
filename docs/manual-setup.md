@@ -214,23 +214,39 @@ cat > /usr/local/bin/upssched-cmd.sh <<'EOF'
 # 本脚本由 upssched 以 nut 用户身份执行, 权限很低 —— 写不了 root 的日志,
 # 也运行不了 qm。所以不能直接关机, 只能通知 root 的 upsmon 去执行。
 LOG=/var/log/ups-shutdown.log
+UPSNAME_LOCAL="bk650m2"      # 改成你自己的 UPS 名
 
 note() {
     logger -t ups-shutdown "$1"
     echo "$(date '+%F %T') [upssched] $1" >>"$LOG" 2>/dev/null || true
 }
 
+# 关机前确认确实在用电池 —— UPS 充电或自检时会瞬时误报 LB 标志
+on_battery() {
+    local st
+    st=$(upsc "$UPSNAME_LOCAL" ups.status 2>/dev/null)
+    [[ "$st" == *OB* ]]
+}
+
 case "$1" in
     onbatt-shutdown)
-        note "断电持续超时, 通知 upsmon 执行关机"
-        /sbin/upsmon -c fsd
+        if on_battery; then
+            note "断电持续超时, 通知 upsmon 执行关机"
+            /sbin/upsmon -c fsd
+        else
+            note "倒计时到期但市电已恢复, 取消关机"
+        fi
         ;;
     online-back)
         note "市电已恢复, 取消关机倒计时"
         ;;
     lowbatt-now)
-        note "电池电量过低, 通知 upsmon 立即关机"
-        /sbin/upsmon -c fsd
+        if on_battery; then
+            note "电池电量过低且正在放电, 通知 upsmon 立即关机"
+            /sbin/upsmon -c fsd
+        else
+            note "收到低电量信号但市电正常, 忽略 —— 多为充电中的误报"
+        fi
         ;;
     *)
         note "未知事件: $1"
@@ -244,6 +260,17 @@ touch /var/log/ups-shutdown.log
 chown root:nut /var/log/ups-shutdown.log
 chmod 664 /var/log/ups-shutdown.log
 ```
+
+> **为什么每次关机前都要查一遍 `ups.status`**
+>
+> UPS 报的 LB(低电量)标志并不可靠。实测遇到过：市电 220V 正常供电、
+> 电池 99%、状态是 `OL CHRG`，UPS 仍然报了一次 `battery is low`，
+> 结果整机无故关闭。原因是电池刚经历过深度放电、正在充电，UPS 内部对
+> 剩余续航的估算会剧烈跳变(观察到 3581s 和 2578s 之间反复), 一旦
+> 跌破 `battery.runtime.low` 就会置 LB 位。
+>
+> 所以 LOWBATT 只有在 `OB`(电池供电)状态下才有意义，市电正常时收到
+> 一律当误报忽略。
 
 > **为什么绕这么一圈**
 >

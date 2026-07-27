@@ -234,6 +234,23 @@ nut-scanner -U
 
 `/etc/nut/upsd.users` 和 `/etc/nut/upsmon.conf` 里的用户名或密码不一致。这是手工配置最容易踩的坑，重新跑一遍 `install.sh` 即可。
 
+**没停电，服务器却自己关机了**
+
+先看日志确认是不是 UPS 触发的：
+
+```bash
+grep -E "低电量|断电持续" /var/log/ups-shutdown.log
+journalctl --since today | grep -iE "battery is low|on battery"
+```
+
+如果看到 `battery is low` 但前面没有 `on battery`，那就是 **UPS 误报低电量**。
+常见于电池刚深度放电过、正在充电时——UPS 对剩余续航的估算会剧烈跳变，
+跌破阈值就置 LB 标志，即使市电一直正常。
+
+本项目的回调脚本已经做了防护：收到低电量信号时会先查 `ups.status`，
+只有确认在 `OB`（电池供电）状态才关机。如果你是手工配置的，检查
+`/usr/local/bin/upssched-cmd.sh` 里有没有 `on_battery` 这个判断函数。
+
 **断电后没等够设定时间就关机了**
 
 检查低电量阈值：

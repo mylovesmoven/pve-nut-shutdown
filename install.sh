@@ -453,33 +453,57 @@ chmod 640 /etc/nut/ups.conf /etc/nut/upsd.users /etc/nut/nut.conf \
 ok "NUT 配置写入完成"
 
 # ---- 事件回调脚本 ----
-cat > /usr/local/bin/upssched-cmd.sh <<'EOF'
+# UPS 名字要嵌进脚本, 所以这一段用可展开的 heredoc
+cat > /usr/local/bin/upssched-cmd.sh <<EOF
 #!/bin/bash
-# upssched 事件回调
+# upssched 事件回调 (由 install.sh 生成)
 #
 # 重要: 本脚本由 upssched 以 nut 用户身份执行, 权限很低 ——
 # 既写不了 root 的日志文件, 也运行不了 qm(PVE 的集群 IPC 需要 root,
 # 否则报 ipcc_send_rec failed)。所以这里绝不能直接调用关机脚本, 而是用
-# `upsmon -c fsd` 通知以 root 运行的 upsmon 父进程, 由它执行 upsmon.conf
+# \`upsmon -c fsd\` 通知以 root 运行的 upsmon 父进程, 由它执行 upsmon.conf
 # 里 SHUTDOWNCMD 指定的分级关机脚本 —— 那才是有 root 权限的执行路径。
 LOG=/var/log/ups-shutdown.log
+UPSNAME_LOCAL="${UPSNAME}"
+EOF
+
+# 其余部分不需要变量替换, 用带引号的 heredoc 追加
+cat >> /usr/local/bin/upssched-cmd.sh <<'EOF'
 
 note() {
     logger -t ups-shutdown "$1"
     echo "$(date '+%F %T') [upssched] $1" >>"$LOG" 2>/dev/null || true
 }
 
+# 关机前必须确认当前确实在用电池供电。
+# UPS 在充电(尤其刚深度放电过)或自检时会瞬时误报 LB 标志, 此时市电正常,
+# 直接关机就是误关 —— 实测遇到过: 市电 220V 正常、电量 99%, UPS 仍报了
+# 一次 battery is low, 导致整机无故关闭。
+on_battery() {
+    local st
+    st=$(upsc "$UPSNAME_LOCAL" ups.status 2>/dev/null)
+    [[ "$st" == *OB* ]]
+}
+
 case "$1" in
     onbatt-shutdown)
-        note "断电持续超时, 通知 upsmon 执行关机"
-        /sbin/upsmon -c fsd
+        if on_battery; then
+            note "断电持续超时, 通知 upsmon 执行关机"
+            /sbin/upsmon -c fsd
+        else
+            note "倒计时到期但市电已恢复(状态: $(upsc "$UPSNAME_LOCAL" ups.status 2>/dev/null)), 取消关机"
+        fi
         ;;
     online-back)
         note "市电已恢复, 取消关机倒计时"
         ;;
     lowbatt-now)
-        note "电池电量过低, 通知 upsmon 立即关机"
-        /sbin/upsmon -c fsd
+        if on_battery; then
+            note "电池电量过低且正在放电, 通知 upsmon 立即关机"
+            /sbin/upsmon -c fsd
+        else
+            note "收到低电量信号, 但市电正常(状态: $(upsc "$UPSNAME_LOCAL" ups.status 2>/dev/null)), 忽略 —— 多为充电中的误报"
+        fi
         ;;
     *)
         note "未知事件: $1"
