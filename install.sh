@@ -475,35 +475,64 @@ note() {
     echo "$(date '+%F %T') [upssched] $1" >>"$LOG" 2>/dev/null || true
 }
 
-# 关机前必须确认当前确实在用电池供电。
-# UPS 在充电(尤其刚深度放电过)或自检时会瞬时误报 LB 标志, 此时市电正常,
-# 直接关机就是误关 —— 实测遇到过: 市电 220V 正常、电量 99%, UPS 仍报了
-# 一次 battery is low, 导致整机无故关闭。
-on_battery() {
-    local st
-    st=$(upsc "$UPSNAME_LOCAL" ups.status 2>/dev/null)
-    [[ "$st" == *OB* ]]
+# 关机前确认供电状态, 三态判断:
+#   POWER_STATE=onbatt   确认正在电池放电 -> 关机
+#   POWER_STATE=online   确认市电正常(如 OL CHRG) -> 忽略误报
+#   POWER_STATE=unknown  连续 3 次查询失败(每次间隔 3 秒) -> fail-safe 按断电处理, 照常关机
+# 说明: UPS 充电或自检时可能瞬时误报 LB(实测: 市电正常、电量 99% 仍报过
+# battery is low), 所以 online 时忽略; 但 upsd 瞬时不可达导致查询失败时,
+# 绝不能当成"市电正常"跳过关机 —— 真断电时 START-TIMER 只触发一次,
+# 错过就没有第二次机会, 所以 unknown 走 fail-safe 照常关机。
+check_power() {
+    local st try
+    for try in 1 2 3; do
+        st=$(upsc "$UPSNAME_LOCAL" ups.status 2>/dev/null)
+        if [[ -n "$st" ]]; then
+            UPS_STATUS="$st"
+            if [[ "$st" == *OB* ]]; then POWER_STATE=onbatt; else POWER_STATE=online; fi
+            return
+        fi
+        note "查询 UPS 状态失败 (第 ${try}/3 次)"
+        [[ "$try" -lt 3 ]] && sleep 3
+    done
+    POWER_STATE=unknown
 }
 
 case "$1" in
     onbatt-shutdown)
-        if on_battery; then
-            note "断电持续超时, 通知 upsmon 执行关机"
-            /sbin/upsmon -c fsd
-        else
-            note "倒计时到期但市电已恢复(状态: $(upsc "$UPSNAME_LOCAL" ups.status 2>/dev/null)), 取消关机"
-        fi
+        check_power
+        case "$POWER_STATE" in
+            onbatt)
+                note "断电持续超时, 确认仍在电池放电(状态: $UPS_STATUS), 通知 upsmon 执行关机"
+                /sbin/upsmon -c fsd
+                ;;
+            unknown)
+                note "断电倒计时到期, 连续 3 次查询 UPS 状态失败 —— fail-safe: 按断电处理, 通知 upsmon 执行关机"
+                /sbin/upsmon -c fsd
+                ;;
+            online)
+                note "倒计时到期但市电已恢复(状态: $UPS_STATUS), 取消关机"
+                ;;
+        esac
         ;;
     online-back)
         note "市电已恢复, 取消关机倒计时"
         ;;
     lowbatt-now)
-        if on_battery; then
-            note "电池电量过低且正在放电, 通知 upsmon 立即关机"
-            /sbin/upsmon -c fsd
-        else
-            note "收到低电量信号, 但市电正常(状态: $(upsc "$UPSNAME_LOCAL" ups.status 2>/dev/null)), 忽略 —— 多为充电中的误报"
-        fi
+        check_power
+        case "$POWER_STATE" in
+            onbatt)
+                note "电池电量过低且确认正在放电(状态: $UPS_STATUS), 通知 upsmon 立即关机"
+                /sbin/upsmon -c fsd
+                ;;
+            unknown)
+                note "收到低电量信号, 连续 3 次查询 UPS 状态失败 —— fail-safe: 按断电处理, 通知 upsmon 立即关机"
+                /sbin/upsmon -c fsd
+                ;;
+            online)
+                note "收到低电量信号, 但市电正常(状态: $UPS_STATUS), 忽略 —— 多为充电中的误报"
+                ;;
+        esac
         ;;
     *)
         note "未知事件: $1"
