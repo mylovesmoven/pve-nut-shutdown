@@ -48,6 +48,9 @@ APC 的中国特供型号（BK650M2-CH 等）在 apcupsd 下有个经典故障�
 - Proxmox VE 7.x / 8.x / 9.x
 - UPS 通过 **USB 数据线**直连 PVE 主机（不是仅接电源线）
 - UPS 型号被 NUT 支持 — 查[兼容列表](https://networkupstools.org/stable-hcl.html)，主流 APC / 山特 / 施耐德 / 伊顿基本都支持
+- **想让来电后自动开机**：进 BIOS 把 `Restore on AC Power Loss`（或叫
+  AC Recovery / State After G3）设为 **Power On**——本项目负责关机和让 UPS
+  切断输出，来电后能不能自己起来全看这个 BIOS 选项，软件层面替代不了
 
 确认 USB 已连接：
 
