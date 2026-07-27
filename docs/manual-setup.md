@@ -192,8 +192,8 @@ vim /etc/nut/upssched.conf
 
 ```ini
 CMDSCRIPT /usr/local/bin/upssched-cmd.sh
-PIPEFN /run/nut/upssched.pipe
-LOCKFN /run/nut/upssched.lock
+PIPEFN /run/nut/upssched/upssched.pipe
+LOCKFN /run/nut/upssched/upssched.lock
 
 # 市电中断：启动 120 秒倒计时
 AT ONBATT * START-TIMER onbatt-shutdown 120

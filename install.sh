@@ -431,8 +431,10 @@ EOF
 cat > /etc/nut/upssched.conf <<EOF
 # 由 pve-nut-shutdown 自动生成
 CMDSCRIPT /usr/local/bin/upssched-cmd.sh
-PIPEFN /run/nut/upssched.pipe
-LOCKFN /run/nut/upssched.lock
+# Debian 的 tmpfiles 会预建 /run/nut/upssched (0770 nut:nut) 专门放这两个文件,
+# 放在 /run/nut/ 根下 upsmon(以 nut 身份运行) 可能建不出来, 定时器会静默失效
+PIPEFN /run/nut/upssched/upssched.pipe
+LOCKFN /run/nut/upssched/upssched.lock
 
 # 市电中断: 启动倒计时
 AT ONBATT * START-TIMER onbatt-shutdown ${ONBATT_DELAY}
