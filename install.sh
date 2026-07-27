@@ -112,10 +112,31 @@ fi
 title "扫描 UPS"
 
 # 若驱动已在运行(重复安装场景), 先停掉 —— 否则它占用 USB 设备,
-# nut-scanner 会漏报 serial/product 等字段
+# nut-scanner 会漏报 serial/product 等字段。
+# 注意: 停掉后 UPS 保护即失效, 因此注册 trap 保证中途退出(Ctrl+C / 报错)时能恢复。
+DRIVER_WAS_STOPPED=0
+restore_driver_on_exit() {
+    if [[ "$DRIVER_WAS_STOPPED" -eq 1 ]]; then
+        echo
+        warn "安装未完成, 正在恢复原有的 UPS 驱动..."
+        systemctl restart nut-driver-enumerator.service 2>/dev/null || true
+        sleep 2
+        systemctl start nut-driver.target 2>/dev/null || true
+        sleep 3
+        if systemctl list-units 'nut-driver@*' --no-legend 2>/dev/null | grep -q running; then
+            ok "驱动已恢复, UPS 保护正常"
+        else
+            err "驱动恢复失败! 你的 UPS 保护当前处于失效状态"
+            err "请手动执行: systemctl restart nut-driver-enumerator && systemctl start nut-driver.target"
+        fi
+    fi
+}
+trap restore_driver_on_exit EXIT INT TERM
+
 if systemctl list-units 'nut-driver@*' --no-legend 2>/dev/null | grep -q running; then
     info "检测到 NUT 驱动正在运行, 临时停止以便完整扫描"
     systemctl stop 'nut-driver@*' 2>/dev/null || true
+    DRIVER_WAS_STOPPED=1
     sleep 2
 fi
 
@@ -427,6 +448,8 @@ ok "关机脚本已生成并通过语法检查"
 # 6. 启动服务
 # -----------------------------------------------------------------------------
 title "启动服务"
+# 到这里配置已写完, 下面会正常拉起驱动, 无需再由 trap 兜底
+DRIVER_WAS_STOPPED=0
 systemctl enable --now nut-driver-enumerator.service >/dev/null 2>&1 || true
 sleep 3
 systemctl restart nut-server.service; systemctl enable nut-server.service >/dev/null 2>&1
