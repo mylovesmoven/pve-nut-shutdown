@@ -26,10 +26,15 @@
 - [x] `upssched` 事件回调链路
 - [x] VM 的 ACPI 关机响应（fnOS 实测 10 秒内干净关闭）
 - [x] `install.sh` 端到端运行（首次安装 + 重复安装两种路径）
+- [x] **真实断电演练** —— 拔掉市电，UPS 正确报告 `OB DISCHRG`，upsmon 记录 `on battery`
+- [x] 市电恢复取消机制（断电 50 秒后恢复，关机未触发）
+- [x] upssched 定时器准时到期（实测 120 秒）
+- [x] 完整关机链路：upssched 回调 → `upsmon -c fsd` → SHUTDOWNCMD 以 root 执行 → `qm` 可用
 
 ## 未验证项
 
-- [ ] **真实断电演练** —— 拔掉市电观察完整关机链路
+- [ ] **关机流程跑到底** —— 已验证 SHUTDOWNCMD 能以 root 启动并识别到运行中的虚拟机，
+      但没让它真的把虚拟机和宿主机关掉
 - [ ] 多机 primary/secondary 组网（docs/multi-host.md 基于 NUT 文档编写，未实测）
 - [ ] 其他品牌 UPS（脚本按通用逻辑编写，但只在 APC 上测过）
 - [ ] PVE 7.x / 8.x（只在 9.2.2 上测过）
@@ -61,3 +66,26 @@
 **5. UPS 出厂的 `battery.charge.low` 可能高得离谱**
 
 BK650M2-CH 出厂值是 93%，意味着电量掉 7% 就触发 LOWBATT 立即关机，会架空延迟设置。必须检查并修正。
+
+**6. upssched 回调不能直接关机 —— 这个坑只有真拔电才会暴露**
+
+最初的实现是在 upssched 回调里直接调 `pve-ups-shutdown.sh`。看起来没问题，
+所有非断电测试也都通过了。直到真的拔掉市电才发现：
+
+```
+17:43:20  UPS bk650m2@localhost on battery          ← upsmon 正常识别
+17:45:23  exec_cmd(...upssched-cmd.sh onbatt-shutdown) returned 1   ← 失败
+```
+
+定时器准时到期了，回调也被调用了，但**关机脚本一行都没跑起来**，
+4 台虚拟机全都好好运行着，日志里连一条记录都没有。
+
+根因是权限：upssched 由 upsmon 以 `nut` 用户身份拉起，而
+
+- `exec >> /var/log/ups-shutdown.log` —— 日志属 root，nut 写不了，脚本第 6 行就退出
+- 就算日志能写，`qm` 也需要 root 连 PVE 集群 IPC，nut 跑会报 `ipcc_send_rec failed`
+
+改成用 `upsmon -c fsd` 通知 root 的 upsmon 父进程执行 SHUTDOWNCMD 才对。
+
+这个 bug 的可怕之处在于它**完全静默**：所有服务显示正常、状态读取正确、
+定时器按时触发，唯独最后一步失败，不真断电根本发现不了。

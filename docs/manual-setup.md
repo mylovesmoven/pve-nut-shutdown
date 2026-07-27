@@ -201,36 +201,60 @@ AT ONBATT * START-TIMER onbatt-shutdown 120
 AT ONLINE * CANCEL-TIMER onbatt-shutdown online-back
 # 电池电量低：跳过倒计时立即关机
 AT LOWBATT * EXECUTE lowbatt-now
-# 强制关机信号
-AT FSD * EXECUTE forced-shutdown
 ```
+
+> **不要写 `AT FSD * EXECUTE ...`** —— upsmon 收到 FSD 信号后会自己执行
+> `SHUTDOWNCMD`，从这里再调一次就重复了。
 
 事件回调脚本：
 
 ```bash
 cat > /usr/local/bin/upssched-cmd.sh <<'EOF'
 #!/bin/bash
+# 本脚本由 upssched 以 nut 用户身份执行, 权限很低 —— 写不了 root 的日志,
+# 也运行不了 qm。所以不能直接关机, 只能通知 root 的 upsmon 去执行。
 LOG=/var/log/ups-shutdown.log
+
+note() {
+    logger -t ups-shutdown "$1"
+    echo "$(date '+%F %T') [upssched] $1" >>"$LOG" 2>/dev/null || true
+}
+
 case "$1" in
     onbatt-shutdown)
-        echo "$(date '+%F %T') [upssched] 断电持续超时, 开始关机流程" >>"$LOG"
-        /usr/local/bin/pve-ups-shutdown.sh
+        note "断电持续超时, 通知 upsmon 执行关机"
+        /sbin/upsmon -c fsd
         ;;
     online-back)
-        echo "$(date '+%F %T') [upssched] 市电已恢复, 取消关机倒计时" >>"$LOG"
+        note "市电已恢复, 取消关机倒计时"
         ;;
     lowbatt-now)
-        echo "$(date '+%F %T') [upssched] 电池电量过低, 立即关机" >>"$LOG"
-        /usr/local/bin/pve-ups-shutdown.sh
+        note "电池电量过低, 通知 upsmon 立即关机"
+        /sbin/upsmon -c fsd
         ;;
-    forced-shutdown)
-        echo "$(date '+%F %T') [upssched] 收到 FSD 强制关机信号" >>"$LOG"
-        /usr/local/bin/pve-ups-shutdown.sh
+    *)
+        note "未知事件: $1"
         ;;
 esac
 EOF
 chmod +x /usr/local/bin/upssched-cmd.sh
+
+# upssched 以 nut 用户运行, 要让它能往日志里留痕
+touch /var/log/ups-shutdown.log
+chown root:nut /var/log/ups-shutdown.log
+chmod 664 /var/log/ups-shutdown.log
 ```
+
+> **为什么绕这么一圈**
+>
+> 直觉上应该在这里直接调 `/usr/local/bin/pve-ups-shutdown.sh`，但那样不行：
+> upssched 是 upsmon 以 `nut` 用户身份拉起的，而关闭虚拟机要用 `qm`，
+> `qm` 需要 root 才能连上 PVE 的集群 IPC（否则报 `ipcc_send_rec failed`）。
+>
+> 更糟的是这个错误**完全静默** —— 断电时 upsmon 会正常记录 `on battery`，
+> 定时器也会准时到期，只有关机那一步失败，日志里什么都看不到。
+> 所以必须用 `upsmon -c fsd` 把控制权交回给以 root 运行的 upsmon 父进程，
+> 由它执行 `SHUTDOWNCMD`。
 
 ## 第 9 步：编写分级关机脚本
 

@@ -442,8 +442,8 @@ AT ONBATT * START-TIMER onbatt-shutdown ${ONBATT_DELAY}
 AT ONLINE * CANCEL-TIMER onbatt-shutdown online-back
 # 电池低电量: 跳过倒计时立即关机
 AT LOWBATT * EXECUTE lowbatt-now
-# 强制关机信号
-AT FSD * EXECUTE forced-shutdown
+# 注意: 不要写 AT FSD —— upsmon 收到 FSD 后会自己执行 SHUTDOWNCMD,
+# 再从这里调一次会重复触发
 EOF
 
 chown root:nut /etc/nut/ups.conf /etc/nut/upsd.users /etc/nut/nut.conf \
@@ -455,28 +455,34 @@ ok "NUT 配置写入完成"
 # ---- 事件回调脚本 ----
 cat > /usr/local/bin/upssched-cmd.sh <<'EOF'
 #!/bin/bash
+# upssched 事件回调
+#
+# 重要: 本脚本由 upssched 以 nut 用户身份执行, 权限很低 ——
+# 既写不了 root 的日志文件, 也运行不了 qm(PVE 的集群 IPC 需要 root,
+# 否则报 ipcc_send_rec failed)。所以这里绝不能直接调用关机脚本, 而是用
+# `upsmon -c fsd` 通知以 root 运行的 upsmon 父进程, 由它执行 upsmon.conf
+# 里 SHUTDOWNCMD 指定的分级关机脚本 —— 那才是有 root 权限的执行路径。
 LOG=/var/log/ups-shutdown.log
+
+note() {
+    logger -t ups-shutdown "$1"
+    echo "$(date '+%F %T') [upssched] $1" >>"$LOG" 2>/dev/null || true
+}
+
 case "$1" in
     onbatt-shutdown)
-        echo "$(date '+%F %T') [upssched] 断电持续超时, 开始关机流程" >>"$LOG"
-        logger -t upssched "断电超时, 触发 PVE 关机"
-        /usr/local/bin/pve-ups-shutdown.sh
+        note "断电持续超时, 通知 upsmon 执行关机"
+        /sbin/upsmon -c fsd
         ;;
     online-back)
-        echo "$(date '+%F %T') [upssched] 市电已恢复, 取消关机倒计时" >>"$LOG"
-        logger -t upssched "市电恢复, 关机已取消"
+        note "市电已恢复, 取消关机倒计时"
         ;;
     lowbatt-now)
-        echo "$(date '+%F %T') [upssched] 电池电量过低, 立即关机" >>"$LOG"
-        logger -t upssched "电池低电量, 立即关机"
-        /usr/local/bin/pve-ups-shutdown.sh
-        ;;
-    forced-shutdown)
-        echo "$(date '+%F %T') [upssched] 收到 FSD 强制关机信号" >>"$LOG"
-        /usr/local/bin/pve-ups-shutdown.sh
+        note "电池电量过低, 通知 upsmon 立即关机"
+        /sbin/upsmon -c fsd
         ;;
     *)
-        logger -t upssched "未知事件: $1"
+        note "未知事件: $1"
         ;;
 esac
 EOF
@@ -556,6 +562,9 @@ EOF
 
 chmod +x /usr/local/bin/pve-ups-shutdown.sh
 touch /var/log/ups-shutdown.log
+# upssched 以 nut 用户运行, 要让它也能往日志里留痕
+chown root:nut /var/log/ups-shutdown.log
+chmod 664 /var/log/ups-shutdown.log
 bash -n /usr/local/bin/pve-ups-shutdown.sh || die "生成的关机脚本语法错误"
 ok "关机脚本已生成并通过语法检查"
 
